@@ -1,0 +1,23 @@
+{
+  "name": "sql-studio-pro-vercel-final",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "0.3.16",
+    "@monaco-editor/react": "4.7.0",
+    "firebase": "11.10.0",
+    "monaco-editor": "0.52.2",
+    "next": "15.4.10",
+    "react": "19.1.2",
+    "react-dom": "19.1.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
