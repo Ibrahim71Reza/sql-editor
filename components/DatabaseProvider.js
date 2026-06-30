@@ -6,6 +6,7 @@ import { downloadBlob, quoteIdentifier, safeTableName, parseCsv, buildImportSql 
 
 const DbContext = createContext(null);
 const IDB_NAME = "sql-studio-pro-local";
+const DB_STATE_KEY = "sql-studio-pro-local:state";
 
 const SEED_SQL = `
 CREATE TABLE IF NOT EXISTS employees (
@@ -92,6 +93,24 @@ function deleteIndexedDbDatabase(name) {
     request.onerror = () => reject(request.error || new Error("Unable to delete local database."));
     request.onblocked = () => reject(new Error("Close other tabs using this app, then try again."));
   });
+}
+
+function getDatabaseState() {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(DB_STATE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function setDatabaseState(state) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(DB_STATE_KEY, state);
+  } catch {
+    // LocalStorage can be disabled in private browsing; the database still works.
+  }
 }
 
 async function closeDatabaseQuietly(database) {
@@ -211,22 +230,39 @@ export function DatabaseProvider({ children }) {
       workerRef.current = workerInstance;
       dbRef.current = workerInstance;
 
-      await workerInstance.exec(SEED_SQL);
+      const stateBeforeInit = getDatabaseState();
+      let nextSchema = await readPublicSchema(workerInstance);
       if (seq !== initSeqRef.current) {
         await closeDatabaseQuietly(workerInstance);
         return;
       }
 
-      const nextSchema = await readPublicSchema(workerInstance);
-      if (seq !== initSeqRef.current) {
-        await closeDatabaseQuietly(workerInstance);
-        return;
+      const shouldSeedDemo = options.seedDemo === true || (!loadBlob && !stateBeforeInit && nextSchema.length === 0);
+
+      if (shouldSeedDemo) {
+        await workerInstance.exec(SEED_SQL);
+        if (seq !== initSeqRef.current) {
+          await closeDatabaseQuietly(workerInstance);
+          return;
+        }
+        nextSchema = await readPublicSchema(workerInstance);
+        if (seq !== initSeqRef.current) {
+          await closeDatabaseQuietly(workerInstance);
+          return;
+        }
       }
 
       setDb(workerInstance);
       setSchema(nextSchema);
       setIsReady(true);
       setStatus("ready");
+      if (loadBlob) {
+        setDatabaseState("restored");
+      } else if (shouldSeedDemo) {
+        setDatabaseState("seeded");
+      } else if (!stateBeforeInit) {
+        setDatabaseState("initialized");
+      }
     } catch (error) {
       console.error("Database initialization failed:", error);
       if (seq === initSeqRef.current) {
@@ -256,7 +292,7 @@ export function DatabaseProvider({ children }) {
     if (!database) throw new Error("Database is not ready yet.");
 
     const started = performance.now();
-    const res = await database.exec(sql);
+    const res = await database.exec(sql, { rowMode: "array" });
     const elapsedMs = Math.round(performance.now() - started);
     const normalized = normalizeExecResults(res, elapsedMs);
     await refreshSchema(database);
@@ -290,10 +326,10 @@ export function DatabaseProvider({ children }) {
     await closeDatabaseQuietly(oldWorker);
     await deleteIndexedDbDatabase(IDB_NAME);
     await deleteIndexedDbDatabase(`/pglite/${IDB_NAME}`);
-    await initDb();
+    await initDb(null, { seedDemo: true });
   }, [initDb]);
 
-  const importCsvFile = useCallback(async (file, requestedTableName) => {
+  const importCsvFile = useCallback(async (file, requestedTableName, options = {}) => {
     const database = dbRef.current;
     if (!database || !file) throw new Error("Database is not ready yet.");
     if (file.size > 5 * 1024 * 1024) throw new Error("CSV file is too large for browser import. Keep it under 5MB.");
@@ -301,7 +337,7 @@ export function DatabaseProvider({ children }) {
     const parsed = parseCsv(text);
     if (!parsed.headers.length) throw new Error("CSV file has no header row.");
     const tableName = safeTableName(requestedTableName || file.name);
-    const sql = buildImportSql({ tableName, headers: parsed.headers, rows: parsed.rows });
+    const sql = buildImportSql({ tableName, headers: parsed.headers, rows: parsed.rows, replaceExisting: options.replaceExisting === true });
     await execSql(sql);
     await refreshSchema(database);
     return { tableName, rowCount: parsed.rows.length };

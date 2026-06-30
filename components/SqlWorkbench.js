@@ -15,8 +15,13 @@ import {
   id,
   quoteIdentifier,
   resultToCsv,
+  safeTableName,
   setLocalJson,
 } from "@/lib/sqlUtils";
+
+function getCellValue(row, field, index) {
+  return Array.isArray(row) ? row[index] : row?.[field.name];
+}
 
 function getSortableValue(value) {
   if (value === null || value === undefined) return "";
@@ -50,14 +55,23 @@ function EmptyState({ title = "No output yet", text = "Run SQL to see results he
 
 function DataTable({ result, title, maxHeight = 420, compact = false, onNotice }) {
   const [filter, setFilter] = useState("");
-  const [sort, setSort] = useState({ column: "", direction: "asc" });
+  const [sort, setSort] = useState({ index: -1, direction: "asc" });
 
   const fields = result?.fields || [];
   const rows = result?.rows || [];
+  const fieldDescriptors = useMemo(
+    () => fields.map((field, index) => ({
+      field,
+      index,
+      label: field.name || `column_${index + 1}`,
+      key: `${field.name || "column"}-${index}`,
+    })),
+    [fields]
+  );
 
   useEffect(() => {
     setFilter("");
-    setSort({ column: "", direction: "asc" });
+    setSort({ index: -1, direction: "asc" });
   }, [result?.id]);
 
   const visibleRows = useMemo(() => {
@@ -65,14 +79,15 @@ function DataTable({ result, title, maxHeight = 420, compact = false, onNotice }
     const term = filter.trim().toLowerCase();
 
     if (term) {
-      nextRows = nextRows.filter((row) => fields.some((field) => String(row[field.name] ?? "").toLowerCase().includes(term)));
+      nextRows = nextRows.filter((row) => fieldDescriptors.some(({ field, index }) => String(getCellValue(row, field, index) ?? "").toLowerCase().includes(term)));
     }
 
-    if (sort.column) {
+    if (sort.index >= 0) {
       const direction = sort.direction === "asc" ? 1 : -1;
       nextRows.sort((leftRow, rightRow) => {
-        const left = getSortableValue(leftRow[sort.column]);
-        const right = getSortableValue(rightRow[sort.column]);
+        const descriptor = fieldDescriptors[sort.index];
+        const left = getSortableValue(getCellValue(leftRow, descriptor.field, descriptor.index));
+        const right = getSortableValue(getCellValue(rightRow, descriptor.field, descriptor.index));
         if (left < right) return -1 * direction;
         if (left > right) return 1 * direction;
         return 0;
@@ -80,13 +95,13 @@ function DataTable({ result, title, maxHeight = 420, compact = false, onNotice }
     }
 
     return nextRows;
-  }, [rows, fields, filter, sort]);
+  }, [rows, fieldDescriptors, filter, sort]);
 
-  const toggleSort = (column) => {
+  const toggleSort = (index) => {
     setSort((current) => {
-      if (current.column !== column) return { column, direction: "asc" };
-      if (current.direction === "asc") return { column, direction: "desc" };
-      return { column: "", direction: "asc" };
+      if (current.index !== index) return { index, direction: "asc" };
+      if (current.direction === "asc") return { index, direction: "desc" };
+      return { index: -1, direction: "asc" };
     });
   };
 
@@ -128,9 +143,9 @@ function DataTable({ result, title, maxHeight = 420, compact = false, onNotice }
         <table className="simple-table">
           <thead>
             <tr>
-              {fields.map((field) => (
-                <th key={field.name} onClick={() => toggleSort(field.name)}>
-                  {field.name}{sort.column === field.name ? (sort.direction === "asc" ? " ↑" : " ↓") : ""}
+              {fieldDescriptors.map(({ field, index, key, label }) => (
+                <th key={key} onClick={() => toggleSort(index)}>
+                  {label}{sort.index === index ? (sort.direction === "asc" ? " ↑" : " ↓") : ""}
                 </th>
               ))}
             </tr>
@@ -138,9 +153,9 @@ function DataTable({ result, title, maxHeight = 420, compact = false, onNotice }
           <tbody>
             {visibleRows.map((row, rowIndex) => (
               <tr key={`${result.id}-${rowIndex}`}>
-                {fields.map((field) => {
-                  const value = row[field.name];
-                  return <td key={field.name} className={value === null ? "null-value" : ""}>{value === null ? "NULL" : String(value)}</td>;
+                {fieldDescriptors.map(({ field, index, key }) => {
+                  const value = getCellValue(row, field, index);
+                  return <td key={key} className={value === null ? "null-value" : ""}>{value === null ? "NULL" : String(value)}</td>;
                 })}
               </tr>
             ))}
@@ -343,7 +358,7 @@ export default function SqlWorkbench() {
     for (const table of schema) {
       try {
         const started = performance.now();
-        const resultList = await db.exec(`SELECT * FROM ${quoteIdentifier(table.tableName)} LIMIT 10;`);
+        const resultList = await db.exec(`SELECT * FROM ${quoteIdentifier(table.tableName)} LIMIT 10;`, { rowMode: "array" });
         const elapsedMs = Math.round(performance.now() - started);
         const normalized = (Array.isArray(resultList) ? resultList : []).map((item, index) => ({
           id: `preview-${table.tableName}-${Date.now()}-${index}`,
@@ -396,8 +411,13 @@ export default function SqlWorkbench() {
     if (!file) return;
     const requestedName = prompt("Table name for this CSV:", file.name.replace(/\.[^.]+$/, ""));
     if (!requestedName) return;
+    const tableName = safeTableName(requestedName || file.name);
+    const tableExists = schema.some((table) => table.tableName === tableName);
+    const replaceExisting = tableExists
+      ? confirm(`Table "${tableName}" already exists.\n\nOK: replace the table with this CSV.\nCancel: append rows to the existing table.`)
+      : false;
     try {
-      const imported = await importCsvFile(file, requestedName);
+      const imported = await importCsvFile(file, tableName, { replaceExisting });
       showToast(`Imported ${imported.rowCount} rows into ${imported.tableName}.`);
       await refreshSchema();
       await refreshPreviews(false);
