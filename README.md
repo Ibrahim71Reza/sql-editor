@@ -67,7 +67,8 @@ Recommended settings:
 
 - Install command: `npm ci --no-audit --no-fund`
 - Build command: `npm run build`
-- Output directory: `out`
+- Framework preset: `Next.js`
+- Output directory: leave unset/default
 
 These are already set in `vercel.json`.
 
